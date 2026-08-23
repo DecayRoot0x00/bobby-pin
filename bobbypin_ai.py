@@ -8,12 +8,45 @@
 #
 # every response: {"ok": bool, "cmd": str, "data": ...} so callers never parse prose.
 import json
+import os
+import re as _re
+import shutil
 import sys
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import bobbypin as bp
 
 MAX_DISASM = 200
+
+# ---------------------------------------------------------------------------
+# Electron license bypass: Proxy stub that satisfies any SecureApiClient call
+# ---------------------------------------------------------------------------
+SECURE_CLIENT_STUB = """\
+'use strict';
+const SUCCESS={success:true,message:'OK',info:{},status:'ok',statusCode:1};
+function makeStubInstance(){
+  return new Proxy(Object.create(null),{
+    get(_t,prop){
+      if(prop==='then')return undefined;
+      if(prop===Symbol.toPrimitive||prop==='valueOf'||prop==='toString')
+        return()=>'[SecureClientStub]';
+      return async function(){return{...SUCCESS};};
+    },
+  });
+}
+function SecureApiClient(){return makeStubInstance();}
+SecureApiClient.prototype={};
+module.exports=new Proxy(SecureApiClient,{
+  construct(_t,_a){return makeStubInstance();},
+  apply(_t,_th,_a){return makeStubInstance();},
+  get(_t,prop){
+    if(prop==='prototype')return SecureApiClient.prototype;
+    if(prop==='default')return SecureApiClient;
+    return SecureApiClient[prop];
+  },
+});
+module.exports.default=module.exports;
+"""
 
 
 def _err(cmd, msg):
@@ -25,6 +58,60 @@ def _pe(path):
     pe = bp.parse_pe(data)
     return data, pe
 
+
+# ---------------------------------------------------------------------------
+# ASAR helpers
+# ---------------------------------------------------------------------------
+
+def _decode_hex_str(s):
+    """Decode JS \\xNN escape sequences in a Python string (as read from file)."""
+    return _re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), s)
+
+
+def _load_asar(path):
+    """Parse ASAR. Returns (raw_bytes, header_json, file_data_start)."""
+    data = open(path, "rb").read()
+    H = bp.u32(data, 4)
+    jlen = bp.u32(data, 12)
+    file_data_start = 8 + H
+    header_json = json.loads(data[16:16 + jlen])
+    return data, header_json, file_data_start
+
+
+def _asar_read(data, header_json, file_data_start, asar_path):
+    """Read one file's bytes from a parsed ASAR."""
+    def walk(node, prefix=""):
+        for name, child in node.items():
+            p = f"{prefix}/{name}"
+            if "files" in child:
+                r = walk(child["files"], p)
+                if r is not None:
+                    return r
+            elif p == asar_path and "offset" in child and "unpacked" not in child:
+                off = int(child["offset"])
+                size = int(child.get("size", 0))
+                return data[file_data_start + off:file_data_start + off + size]
+        return None
+    return walk(header_json.get("files", {}))
+
+
+def _asar_find(header_json, pattern):
+    """Return all ASAR paths matching a regex pattern."""
+    matches = []
+    def walk(node, prefix=""):
+        for name, child in node.items():
+            p = f"{prefix}/{name}"
+            if "files" in child:
+                walk(child["files"], p)
+            elif _re.search(pattern, p, _re.IGNORECASE):
+                matches.append(p)
+    walk(header_json.get("files", {}))
+    return matches
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 
 def cmd_help(_args):
     return {"ok": True, "cmd": "help", "data": {
@@ -39,13 +126,47 @@ def cmd_help(_args):
             "patch": '{"src":"...","dst":"...","patches":[{"offset":"0xdef","mode":"nop"}]} '
                      "-> applies nop|flip|byte:<hex>, writes dst, reports per-patch result",
             "verify": '{"orig":"...","new":"..."} -> byte-level diff summary',
+            "asar_repack": '{"orig":"...","out":"...","mods":{"/asar/path":"local/file"}} '
+                           '-> repack ASAR with file replacements, updates per-file integrity hashes',
+            "electron_plan": '{"asar":"path/to/app.asar"} '
+                             '-> find isLicenseValid guards, IPC channels, secureClient path, '
+                             'license.html structure; returns recommended patches',
+            "electron_bypass": '{"asar":"path/to/app.asar","out":"path/to/app.asar","backup":"...bak"} '
+                               '-> full 3-step bypass: flip isLicenseValid to true in main.js, '
+                               'stub secureClient.js, patch license.html IPC call; repacks ASAR',
             "quit": "{} -> close session",
         },
-        "recommended_flow": [
+        "recommended_flow_pe": [
             "plan -> read warnings/candidates first",
             "disasm around each candidate jcc_off to confirm intent",
             "patch with mode nop first, flip if nop changes nothing",
             "verify orig vs new, then hand off to runtime testing",
+        ],
+        "recommended_flow_electron": [
+            "electron_plan {asar} -> identify guards, IPC channels, secureClient path",
+            "electron_bypass {asar, out} -> apply all three patches in one step",
+            "if 'License not validated' after success screen: isLicenseValid guard wasn't patched",
+            "if 'Invalid license format': license.html IPC bypass patch not applied",
+            "if app errors after launch: check startApplication IPC handler for additional guards",
+        ],
+        "electron_bypass_what_it_does": [
+            "1. main.js: finds isLicenseValid=![] (and similar) and flips to !![] (true at startup)",
+            "   - needed because startApplication IPC checks this flag before creating the main window",
+            "   - the validate-license handler uses makeKeyAuthRequest() directly, bypassing secureClient,",
+            "     so stubbing secureClient alone does NOT set this flag",
+            "2. secureClient.js: replaces with a Proxy stub returning {success:true} for every call",
+            "   - handles any SecureApiClient method call from main process IPC handlers",
+            "3. license.html: fires validateLicense IPC with a dummy UUID (to satisfy any format check",
+            "   and set whatever state the handler does set), then overrides result to {success:true}",
+            "   - 2-second delay before startApplication gives the fire-and-forget IPC time to complete",
+        ],
+        "asar_format_notes": [
+            "Chromium Pickle 4-field header: [u32:4][u32:H][u32:H-4][u32:J][JSON(J bytes)][pad][file data]",
+            "file_data_start = 8 + H  (NOT 12 + jlen)",
+            "JSON at offset 16 (NOT 12); u32@12 is J (JSON length), u32@8 is H-4 (inner payload)",
+            "per-file integrity field must be updated after replacement or Electron rejects the file",
+            "app.asar.sha256 (whole-ASAR fuse) may not exist; check resources/ dir before worrying",
+            "ENFORCE_INTEGRITY_CHECK env var in main.js controls the app-level manifest check (separate)",
         ],
         "rules": [
             "never write patches to src path - always a separate dst",
@@ -67,7 +188,12 @@ def _triage(path):
         return rep
     if bp.parse_asar(data) is not None:
         rep["kind"] = "asar"
-        rep["note"] = "electron archive - static branch patching does not apply"
+        rep["electron"] = True
+        rep["note"] = (
+            "Electron ASAR archive - JS-level patching applies; "
+            "use electron_plan then electron_bypass. "
+            "Native branch patching does not apply to the JS layer."
+        )
         return rep
     if bp.PYINST_MAGIC in data:
         rep["kind"] = "pyinstaller"
@@ -188,7 +314,15 @@ def cmd_plan(args):
         return _err("plan", "need path")
     tri = _triage(path)
     data_out = {"triage": tri}
-    if tri.get("kind") in ("pe32+", "pe32"):
+    if tri.get("kind") == "asar":
+        # Delegate to electron_plan for JS-level analysis
+        ep = cmd_electron_plan({"asar": path})
+        data_out["electron_analysis"] = ep.get("data", {})
+        data_out["suggested_next"] = [
+            "run electron_bypass {asar, out} to apply all patches in one step",
+            "or apply manually: flip isLicenseValid guard, stub secureClient, patch license.html",
+        ]
+    elif tri.get("kind") in ("pe32+", "pe32"):
         data_out["candidates"] = cmd_candidates({"path": path})["data"]
         data_out["interesting_strings"] = cmd_strings({"path": path, "limit": 25})["data"]
         data_out["suggested_next"] = [
@@ -214,7 +348,6 @@ def cmd_patch(args):
         off = int(off_s, 16) if isinstance(off_s, str) else int(off_s)
         cur = data[off:off + 6]
         inv = bp._invert_jcc(cur)
-        # short jcc = opcode+rel8 (2 bytes), long form = 0F8x+rel32 (6 bytes)
         if inv:
             size = 6 if cur[:1] == b"\x0f" else 2
         else:
@@ -267,17 +400,387 @@ def cmd_verify(args):
             "data": {"same_size": True, "regions_changed": len(diffs), "diffs": diffs}}
 
 
+# ---------------------------------------------------------------------------
+# ASAR repack command
+# ---------------------------------------------------------------------------
+
+def cmd_asar_repack(args):
+    """
+    Repack an ASAR with file replacements.
+    mods: {"/asar/path": "local/file/path"}  - local files are read and embedded.
+    """
+    orig = args.get("orig")
+    out = args.get("out")
+    mods_map = args.get("mods", {})
+    if not orig or not out:
+        return _err("asar_repack", "need orig + out")
+    if orig == out and not args.get("force"):
+        return _err("asar_repack", "orig == out: pass force:true to overwrite in place")
+    mods = {}
+    for asar_path, local_path in mods_map.items():
+        try:
+            mods[asar_path] = open(local_path, "rb").read()
+        except OSError as ex:
+            return _err("asar_repack", f"cannot read {local_path}: {ex}")
+    try:
+        result = bp.repack_asar(orig, out, mods)
+    except Exception as ex:
+        return _err("asar_repack", f"repack failed: {ex}")
+    return {"ok": True, "cmd": "asar_repack", "data": result}
+
+
+# ---------------------------------------------------------------------------
+# Electron plan command
+# ---------------------------------------------------------------------------
+
+def cmd_electron_plan(args):
+    """
+    Analyze an Electron ASAR for license bypass opportunities.
+
+    Looks for:
+      - isLicenseValid / licenseValidated boolean guards in main.js
+      - ipcMain.handle channel names (hex-decoded)
+      - secureClient require path
+      - makeKeyAuthRequest (direct HTTP - bypasses secureClient stub)
+      - validateLicense IPC call pattern in license.html
+    """
+    asar_path = args.get("asar") or args.get("path")
+    if not asar_path:
+        return _err("electron_plan", "need asar path")
+    try:
+        data, hdr, fds = _load_asar(asar_path)
+    except Exception as ex:
+        return _err("electron_plan", f"failed to load ASAR: {ex}")
+
+    findings = {
+        "asar": asar_path,
+        "patches_needed": [],
+        "warnings": [],
+        "ipc_channels": [],
+    }
+
+    # ---- main.js ----
+    main_paths = _asar_find(hdr, r"(?:^|/)main\.js$")
+    findings["main_js_candidates"] = main_paths
+    main_js_text = None
+    main_js_asar_path = None
+    for p in main_paths:
+        c = _asar_read(data, hdr, fds, p)
+        if c and b"ipcMain" in c:
+            main_js_text = c.decode("utf-8", "replace")
+            main_js_asar_path = p
+            break
+
+    if main_js_text:
+        findings["main_js"] = main_js_asar_path
+
+        # Boolean guards: variable=![] where name suggests auth/license
+        guard_re = _re.compile(r'([a-zA-Z_$][a-zA-Z0-9_$]*)=!\[\]')
+        seen_guards = {}
+        for m in guard_re.finditer(main_js_text):
+            name = m.group(1)
+            if name in seen_guards:
+                continue
+            if any(kw in name.lower() for kw in
+                   ("license", "valid", "auth", "verified", "paid", "unlock")):
+                count = main_js_text.count(m.group(0))
+                seen_guards[name] = {
+                    "variable": name,
+                    "pattern": m.group(0),
+                    "patch": f"{name}=!![]",
+                    "occurrences": count,
+                    "note": "patch FIRST occurrence (declaration); later ones are reset handlers",
+                }
+        guards = list(seen_guards.values())
+        findings["license_guards"] = guards
+        if guards:
+            findings["patches_needed"].append({
+                "file": main_js_asar_path,
+                "type": "boolean_guard",
+                "desc": f"change {guards[0]['variable']}=![] to {guards[0]['variable']}=!![] (first occurrence only)",
+                "why": "startApplication IPC checks this flag before creating the main window",
+            })
+
+        # ipcMain.handle / ipcMain.on channel names (quoted strings only)
+        channels = []
+        for m in _re.finditer(r"ipcMain\[[^\]]+\]\((['\"][^'\"]+['\"])", main_js_text):
+            raw = m.group(1).strip("'\"")
+            channels.append(_decode_hex_str(raw))
+        findings["ipc_channels"] = sorted(set(channels))
+
+        # Direct HTTP client check
+        if "makeKeyAuthRequest" in main_js_text:
+            findings["warnings"].append(
+                "main.js contains makeKeyAuthRequest() - license validation uses direct HTTP, "
+                "not secureClient; stubbing secureClient alone will NOT bypass validation. "
+                "The isLicenseValid boolean guard patch is mandatory."
+            )
+
+        # secureClient require
+        sc_re = _re.compile(r"require\((['\"][^'\"]*[Ss]ecure[Cc]lient[^'\"]*['\"])\)")
+        sc_m = sc_re.search(main_js_text)
+        if sc_m:
+            findings["secureclient_require"] = _decode_hex_str(sc_m.group(1).strip("'\""))
+    else:
+        findings["warnings"].append(
+            "no main.js with ipcMain found - manual analysis needed"
+        )
+
+    # ---- secureClient.js ----
+    sc_paths = _asar_find(hdr, r"(?:^|/)secure[Cc]lient\.js$")
+    findings["secureclient_candidates"] = sc_paths
+    if sc_paths:
+        findings["patches_needed"].append({
+            "file": sc_paths[0],
+            "type": "stub_replace",
+            "desc": "replace with Proxy stub returning {success:true} for every method call",
+            "why": "catches any SecureApiClient calls from IPC handlers that do go through it",
+        })
+
+    # ---- license.html ----
+    lic_paths = _asar_find(hdr, r"(?:^|/)license\.html$")
+    findings["license_html_candidates"] = lic_paths
+    for p in lic_paths:
+        c = _asar_read(data, hdr, fds, p)
+        if c and b"validateLicense" in c:
+            findings["license_html"] = p
+            html = c.decode("utf-8", "replace")
+            if "window.electronAPI.validateLicense" in html:
+                has_fmt = "Invalid license format" in html or "format" in html.lower()
+                findings["patches_needed"].append({
+                    "file": p,
+                    "type": "ipc_bypass",
+                    "desc": (
+                        "fire validateLicense IPC with dummy UUID (to set main-process license state "
+                        "and pass any format check), then override result to {success:true}"
+                    ),
+                    "format_check_present": has_fmt,
+                    "why": "prevents 'Invalid license format' without skipping the IPC entirely "
+                           "(skipping leaves isLicenseValid unset if makeKeyAuthRequest isn't the setter)",
+                })
+            break
+
+    findings["recommended_next"] = (
+        'electron_bypass {"asar":"...","out":"..."} to apply all patches in one step'
+    )
+    return {"ok": True, "cmd": "electron_plan", "data": findings}
+
+
+# ---------------------------------------------------------------------------
+# Electron bypass command
+# ---------------------------------------------------------------------------
+
+def cmd_electron_bypass(args):
+    """
+    Full automated Electron license bypass - 3 patches, 1 repack.
+
+    Patch 1 - main.js boolean guard:
+      Find isLicenseValid=![] (or similar) and flip to !![] so the
+      startApplication IPC handler passes its guard check on startup.
+      The validate-license IPC typically calls makeKeyAuthRequest() directly
+      (not through secureClient), so this guard is the authoritative bypass.
+
+    Patch 2 - secureClient.js stub:
+      Replace the real API client with a Proxy that returns {success:true}
+      for every async call, covering any IPC handlers that do use it.
+
+    Patch 3 - license.html IPC call:
+      Fire validateLicense IPC with a dummy UUID-format key (passes format
+      checks, may set additional state), then force result.success=true so
+      the renderer always transitions to the success flow.
+      startApplication is called 2 seconds later - by then the fire-and-
+      forget IPC has completed and any state it sets is in place.
+    """
+    asar_path = args.get("asar")
+    out_path  = args.get("out") or asar_path
+    bak_path  = args.get("backup") or (asar_path + ".bak") if asar_path else None
+
+    if not asar_path:
+        return _err("electron_bypass", "need asar")
+
+    # Backup
+    backed_up = False
+    if not os.path.exists(bak_path):
+        shutil.copy2(asar_path, bak_path)
+        backed_up = True
+
+    src = bak_path  # always repack from backup so reruns are idempotent
+
+    try:
+        data, hdr, fds = _load_asar(src)
+    except Exception as ex:
+        return _err("electron_bypass", f"failed to load ASAR: {ex}")
+
+    mods = {}
+    applied = []
+    warnings = []
+
+    # ---- Patch 1: main.js boolean guard ----
+    main_js_found = False
+    for p in _asar_find(hdr, r"(?:^|/)main\.js$"):
+        c = _asar_read(data, hdr, fds, p)
+        if not (c and b"ipcMain" in c):
+            continue
+        main_js_found = True
+        text = c.decode("utf-8", "replace")
+
+        guard_re = _re.compile(r'([a-zA-Z_$][a-zA-Z0-9_$]*)=!\[\]')
+        patched_text = text
+        guard_patched = False
+        for m in guard_re.finditer(text):
+            name = m.group(1)
+            if not any(kw in name.lower() for kw in
+                       ("license", "valid", "auth", "verified", "paid", "unlock")):
+                continue
+            old = m.group(0)          # e.g. "isLicenseValid=![]"
+            new = f"{name}=!![]"      # e.g. "isLicenseValid=!![]"
+            count = text.count(old)
+            # Replace only the first occurrence (the declaration site).
+            # Later occurrences are reset handlers (e.g. clear-license IPC) that
+            # should remain false so the app can re-lock if needed.
+            patched_text = patched_text.replace(old, new, 1)
+            guard_patched = True
+            applied.append({
+                "file": p, "type": "boolean_guard",
+                "variable": name, "old": old, "new": new,
+                "occurrences_total": count,
+                "note": "patched first occurrence (declaration); remaining resets left intact",
+            })
+            break  # one guard is enough
+
+        if not guard_patched:
+            warnings.append(
+                f"no license boolean guard found in {p} - "
+                "startApplication may have a different check; inspect manually"
+            )
+
+        mods[p] = patched_text.encode("utf-8")
+        break
+
+    if not main_js_found:
+        warnings.append("main.js with ipcMain not found in ASAR")
+
+    # ---- Patch 2: secureClient.js stub ----
+    stub_bytes = SECURE_CLIENT_STUB.encode("utf-8")
+    sc_paths = _asar_find(hdr, r"(?:^|/)secure[Cc]lient\.js$")
+    if sc_paths:
+        for p in sc_paths:
+            mods[p] = stub_bytes
+            applied.append({
+                "file": p, "type": "stub_replace",
+                "new_size": len(stub_bytes),
+            })
+    else:
+        warnings.append("secureClient.js not found - stub not applied")
+
+    # ---- Patch 3: license.html IPC bypass ----
+    lic_found = False
+    for p in _asar_find(hdr, r"(?:^|/)license\.html$"):
+        c = _asar_read(data, hdr, fds, p)
+        if not (c and b"validateLicense" in c):
+            continue
+        lic_found = True
+        html = c.decode("utf-8", "replace")
+
+        # Try exact pattern first, then flexible regex
+        DUMMY_KEY = "00000000-0000-0000-0000-000000000000"
+        FIRE_AND_FORCE = (
+            f"window.electronAPI.validateLicense('{DUMMY_KEY}').catch(()=>{{}});\n"
+            "                    const result = { success: true };"
+        )
+
+        exact = "const result = await window.electronAPI.validateLicense(trimmedKey);"
+        if exact in html:
+            html = html.replace(exact, FIRE_AND_FORCE, 1)
+            match_type = "exact"
+        else:
+            flex = _re.compile(
+                r"const result\s*=\s*await\s+window\.electronAPI\.validateLicense\([^)]+\);",
+                _re.MULTILINE,
+            )
+            m = flex.search(html)
+            if m:
+                html = html[:m.start()] + FIRE_AND_FORCE + html[m.end():]
+                match_type = "regex"
+            else:
+                warnings.append(
+                    f"validateLicense call not found in {p} - "
+                    "license.html may use a different pattern; inspect manually"
+                )
+                match_type = None
+
+        if match_type:
+            mods[p] = html.encode("utf-8")
+            applied.append({
+                "file": p, "type": "ipc_bypass",
+                "match": match_type,
+                "desc": (
+                    f"fire validateLicense('{DUMMY_KEY}') async (sets main-process state), "
+                    "then force result.success=true"
+                ),
+            })
+        break
+
+    if not lic_found:
+        warnings.append("license.html not found in ASAR")
+
+    # ---- Repack ----
+    try:
+        result = bp.repack_asar(src, out_path, mods)
+    except Exception as ex:
+        return _err("electron_bypass", f"repack failed: {ex}")
+
+    return {
+        "ok": True,
+        "cmd": "electron_bypass",
+        "data": {
+            "backed_up": backed_up,
+            "backup": bak_path,
+            "out": out_path,
+            "size": result["size"],
+            "applied": applied,
+            "warnings": warnings,
+            "troubleshooting": {
+                "still_says_invalid_format": (
+                    "license.html IPC bypass not applied - check license_html_candidates "
+                    "and patch manually if the file path differs"
+                ),
+                "license_not_validated_after_success_screen": (
+                    "isLicenseValid guard not found/patched - look for the variable name "
+                    "in the startApplication IPC handler and add it to the guard keyword list"
+                ),
+                "failed_to_start_application": (
+                    "startApplication handler has additional checks beyond isLicenseValid - "
+                    "run electron_plan and inspect ipc_channels for the handler body"
+                ),
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
 COMMANDS = {
-    "help": cmd_help, "triage": cmd_triage, "strings": cmd_strings,
-    "candidates": cmd_candidates, "disasm": cmd_disasm, "bytes": cmd_bytes,
-    "plan": cmd_plan, "patch": cmd_patch, "verify": cmd_verify,
+    "help":             cmd_help,
+    "triage":           cmd_triage,
+    "strings":          cmd_strings,
+    "candidates":       cmd_candidates,
+    "disasm":           cmd_disasm,
+    "bytes":            cmd_bytes,
+    "plan":             cmd_plan,
+    "patch":            cmd_patch,
+    "verify":           cmd_verify,
+    "asar_repack":      cmd_asar_repack,
+    "electron_plan":    cmd_electron_plan,
+    "electron_bypass":  cmd_electron_bypass,
 }
 
 
 def main():
     args = sys.argv[1:]
     if not args or args[0] != "serve":
-        # one-shot: first arg is a command name, rest is a json blob or key=val
         if not args or args[0] not in COMMANDS:
             print(json.dumps(COMMANDS["help"](None)))
             return
@@ -292,7 +795,6 @@ def main():
                 payload = {"path": raw}
         print(json.dumps(COMMANDS[args[0]](payload)))
         return
-    # serve mode: one json per line on stdin
     for line in sys.stdin:
         line = line.strip()
         if not line:

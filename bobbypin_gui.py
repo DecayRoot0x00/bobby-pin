@@ -1257,7 +1257,7 @@ INDEX_HTML = r"""<!doctype html>
         <div class="banner-left">
           <div class="banner-icon" id="target-icon">PE</div>
           <div class="banner-details">
-            <h2 id="target-filename">target.exe <span class="logo-badge" id="target-kind-badge">PE</span></h2>
+            <h2><span id="target-filename">target.exe</span> <span class="logo-badge" id="target-kind-badge">PE</span></h2>
             <div class="banner-hashes">
               <div class="hash-item" onclick="copyText(CURRENT_DATA.hashes.sha256, 'SHA-256 copied!')">
                 <span>SHA256:</span> <code id="hash-sha256">...</code>
@@ -1383,7 +1383,7 @@ INDEX_HTML = r"""<!doctype html>
 
       <div class="tab-pane" id="pane-frida">
         <div class="cli-command-box">
-          <span id="frida-cli-text">frida -f target.exe -l hook.js --no-pause</span>
+          <span id="frida-cli-text">frida -f target.exe -l hook.js</span>
           <button class="btn btn-secondary btn-sm" onclick="copyFridaCli()">Copy Command</button>
         </div>
         <div class="code-box-wrap">
@@ -1474,7 +1474,7 @@ INDEX_HTML = r"""<!doctype html>
           <div><b style="color:#fff;">Still stuck? Watch it live (Frida).</b></div>
           <div>Some programs check several things or hide the real decision. See it happen in real time:</div>
           <div>1. <b style="color:#fff;">Frida Monitor</b> tab &rarr; <b style="color:#fff;">Download hook.js</b><br>
-          2. Terminal: <span class="wf-code">frida -f "program.exe" -l hook.js --no-pause</span><br>
+          2. Terminal: <span class="wf-code">frida -f "program.exe" -l hook.js</span><br>
           3. Log in while it runs &mdash; you'll see file / HTTP / API calls scroll by live.<br>
           4. Whatever fires immediately <i>before</i> your failure message appears = the real target. Note it and go back to step 3.</div>
           <div class="wf-note">First time? Install Frida with <span class="wf-code">pip install frida-tools</span>.</div>
@@ -1644,7 +1644,7 @@ INDEX_HTML = r"""<!doctype html>
       $('target-icon').textContent = data.kind === 'pe' ? 'PE' : data.kind.toUpperCase().slice(0, 4);
       $('hash-sha256').textContent = data.hashes.sha256.slice(0, 16) + '...' + data.hashes.sha256.slice(-8);
       $('hash-md5').textContent = data.hashes.md5;
-      $('frida-cli-text').textContent = `frida -f "${FNAME}" -l hook.js --no-pause`;
+      $('frida-cli-text').textContent = `frida -f "${FNAME}" -l hook.js`;
 
       // Badges
       $('tab-badge-patches').textContent = data.candidates ? data.candidates.length : 0;
