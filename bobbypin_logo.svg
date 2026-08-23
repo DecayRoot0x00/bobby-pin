@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGlow" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#1c1c1f"/>
+      <stop offset="70%" stop-color="#09090b"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </radialGradient>
+
+    <!-- Metallic Steel Gradient -->
+    <linearGradient id="steelGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="30%" stop-color="#e4e4e7"/>
+      <stop offset="60%" stop-color="#a1a1aa"/>
+      <stop offset="85%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#71717a"/>
+    </linearGradient>
+
+    <!-- Crisp Outer Glow -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background Base Container -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGlow)"/>
+  <rect width="506" height="506" x="3" y="3" rx="109" fill="none" stroke="#27272a" stroke-width="4"/>
+
+  <!-- Unmistakable Classic Bobby Pin (Angled dynamically at -35deg) -->
+  <g transform="translate(256, 256) rotate(-35) translate(-256, -256)" filter="url(#softGlow)">
+    
+    <!-- Outer Bobby Pin Wire -->
+    <!-- Top leg is straight with slight ergonomic curve -->
+    <!-- Closed U-bend loop on left -->
+    <!-- Bottom leg has 3 distinct, crisp classic zig-zag waves / crimps -->
+    <!-- Both ends terminate in classic rounded ball tips -->
+
+    <path d="
+      M 400 200
+      L 140 200
+      C 90 200, 60 230, 60 260
+      C 60 290, 90 320, 140 320
+      L 175 320
+      C 195 320, 205 270, 225 270
+      C 245 270, 255 320, 275 320
+      C 295 320, 305 270, 325 270
+      C 345 270, 355 320, 375 320
+      L 410 335
+    " fill="none" stroke="url(#steelGrad)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Ball tips on the open ends -->
+    <circle cx="402" cy="200" r="22" fill="#ffffff" stroke="#18181b" stroke-width="3"/>
+    <circle cx="412" cy="336" r="22" fill="#ffffff" stroke="#18181b" stroke-width="3"/>
+
+    <!-- Loop Core Accent -->
+    <circle cx="100" cy="260" r="12" fill="#ffffff"/>
+  </g>
+</svg>
