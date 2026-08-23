@@ -33,7 +33,7 @@ Human GUI (if the user prefers clicking): `python3 ~/Documents/bobbypin_gui.py 8
 |---|---|---|
 | `triage` | path | kind, hashes, packers, sections, warnings |
 | `strings` | path, filter?, limit? | tagged literals (AUTH/URL/FAIL/OK) |
-| `candidates` | path | disassembler-verified conditional jumps near tagged strings |
+| `candidates` | path | disassembler-verified conditional jumps near tagged strings, incl. chained guards found by jump-target matching |
 | `disasm` | path, offset(hex), count? | decoded instructions with VAs |
 | `bytes` | path, offset, len? | raw hex at offset |
 | `plan` | path | triage + candidates + top strings + suggested next actions |

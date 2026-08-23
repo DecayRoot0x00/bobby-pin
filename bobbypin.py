@@ -16,7 +16,8 @@ AUTH_KEYWORDS = re.compile(
 )
 FAILURE_WORDS = re.compile(
     r"invalid|expired|wrong|denied|fail|incorrect|not found|unauthorized|"
-    r"license|subscription|blacklist|banned|access denied|bad token",
+    r"license|subscription|blacklist|banned|access denied|bad token|"
+    r"suspend|locked[ -]?out|\blocked\b|deactivated",
     re.IGNORECASE,
 )
 SUCCESS_WORDS = re.compile(
@@ -350,6 +351,10 @@ def find_candidates(data, pe, strings):
                 addr, size, mnem = insns[i]
                 if addr > ref_end + 160:
                     break
+                # a ret means we left the enclosing function; a guard for
+                # this message cannot live past it
+                if mnem == "ret":
+                    break
                 if _is_cond_jump(mnem):
                     jcc_off = sec["raw"] + (addr - base_va)
                     raw = data[jcc_off:jcc_off + size]
@@ -366,6 +371,59 @@ def find_candidates(data, pe, strings):
                     break
                 i += 1
                 steps += 1
+
+        # pass 2 - chained guards ("a second check in a row"). Such a jump
+        # owns no string reference to walk FORWARD from: it is a conditional
+        # jump whose TARGET lands directly on the next guard's failure or
+        # success message. Match jump targets against message references so
+        # every sequential check gets its own candidate card.
+        def _imm_target(off, size, addr):
+            for I in md.disasm(blob[off:off + size], addr):
+                ops = I.operands
+                if ops and ops[0].type == op_imm:
+                    return ops[0].imm & 0xFFFFFFFFFFFFFFFF
+            return None
+
+        jcct = []
+        claimed = {c["str_off"] for c in cands}
+        for addr, size, mnem in insns:
+            if _is_cond_jump(mnem):
+                t = _imm_target(addr - base_va, size, addr)
+                if t is not None:
+                    jcct.append((t, addr, size, mnem))
+        if jcct:
+            jcct.sort()
+            jt_targets = [j[0] for j in jcct]
+            jcc_addrs = sorted(a for a, s_, m_ in insns if _is_cond_jump(m_))
+            rstarts = sorted(r[1] for r in refs)
+            for ref_end, ref_start, va in sorted(refs):
+                if any(soff in claimed for soff, _, _ in va_targets[va]):
+                    continue
+                lo = bisect.bisect_left(jt_targets, ref_start - 64)
+                for t, jaddr, jsize, jmnem in jcct[lo:]:
+                    if t > ref_start + 16:
+                        break
+                    # guards jump FORWARD into their message block;
+                    # backward-targeting jumps are loops, not guards
+                    if t <= jaddr or t - jaddr > 512:
+                        continue
+                    k = bisect.bisect_right(jcc_addrs, jaddr)
+                    if k < len(jcc_addrs) and jcc_addrs[k] < ref_start:
+                        continue
+                    ri = bisect.bisect_left(rstarts, ref_start)
+                    if ri > 0 and rstarts[ri - 1] >= t:
+                        continue
+                    jcc_off = sec["raw"] + (jaddr - base_va)
+                    raw = data[jcc_off:jcc_off + jsize]
+                    for soff, enc, s in va_targets[va]:
+                        cands.append({
+                            "string": s[:60], "kind": _kind_of(s), "encoding": enc,
+                            "str_off": soff,
+                            "ref_off": sec["raw"] + (ref_start - base_va),
+                            "jcc_off": jcc_off,
+                            "jump": jmnem, "bytes": raw.hex(),
+                            "verified": True,
+                        })
 
     best = {}
     for c in sorted(cands, key=lambda c: (c["jcc_off"], 0 if c["kind"] == "FAIL" else 1)):

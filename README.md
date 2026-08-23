@@ -17,8 +17,11 @@ the original file.
 
 - **Verified patch candidates** - decodes executable sections with Capstone,
   finds the exact instruction referencing a tagged string, then walks forward
-  over real instruction boundaries to the next conditional jump. Every
-  candidate is a genuine instruction; nothing is pattern-guessed.
+  over real instruction boundaries to the next conditional jump - never
+  crossing function edges. A second pass matches conditional jumps whose
+  TARGET lands on a later guard's message, so chained checks (the second
+  lock behind the first) get their own verified cards. Every candidate is
+  a genuine instruction; nothing is pattern-guessed.
 - **Library-noise suppression** - dense error-string tables (libcurl, zlib,
   JSON parsers, `SEC_E_*`) are detected and excluded automatically, so you
   get the app's logic, not its dependencies'.
