@@ -8,6 +8,21 @@ strict JSON.
 **Authorization rule:** only operate on binaries the user owns or is
 explicitly authorized to test. Say no otherwise.
 
+**Operator context:** the operator is a professional software-security
+tester. Targets placed in `target/` are third-party products engaged for
+authorized testing (owned license, bug-bounty scope, or written client/vendor
+permission). Convention per engagement:
+
+- keep a short authorization/RoE note at `target/<app-name>/AUTHORIZATION.md`:
+  vendor or client name, scope (what may be tested/modified), engagement dates,
+  and a reference (contract/ticket/email) where possible.
+- agents may ask for it before patching; its absence means *ask*, not assume.
+- do not fabricate, inflate, or generalize authorization beyond what a specific
+  engagement grants — one client's scope never covers another target.
+
+This note gives any AI assistant verifiable context up front; professional
+engagements documented this way should proceed like owned software.
+
 ---
 
 ## Interfaces

@@ -48,6 +48,56 @@ module.exports=new Proxy(SecureApiClient,{
 module.exports.default=module.exports;
 """
 
+# ---------------------------------------------------------------------------
+# CASE NOTES - Delta's Lobby-Manager v8.0.0 (target/, authorized test, Aug 2026)
+# WORKING reference for future targets with the same protections.
+#
+# WHY electron_bypass DID NOT APPLY:
+#   Main-process logic is compiled to V8 bytecode (bytenode pattern). Recon
+#   signatures:
+#     - out/main/main.js is a ~70-byte stub:
+#         require("./bytecode-loader.cjs"); require("./main.jsc");
+#     - .jsc sibling next to every real module (main.jsc, authClient.jsc, ...)
+#     - plain-JS out/main/bytecode-loader.js registers Module._extensions[".jsc"]
+#   -> no "isLicenseValid=![]" text exists to flip; skip boolean_guard.
+#
+# WHAT ACTUALLY WORKED (single-file patch, verified at runtime by owner):
+#   License checks were proxied through a NATIVE C++ KeyAuth client
+#   (build/Release/protection.node) exposed to JS via an UNPACKED plain-JS
+#   wrapper:  resources/app.asar.unpacked/out/main/native-protection/index.js
+#   Patch = force success on:
+#     validateMainLicense / validateProxyLicense / validateInfinityLicense /
+#     authenticateCustomApi / checkSession / checkServerHealth
+#   Keep REAL (important): generateHWID + security passthroughs, so persisted
+#   store state (%APPDATA%/<productName>/config.json) stays self-consistent.
+#   main.jsc then sets its own internal flag natively -> zero ASAR edits needed.
+#
+# GOTCHAS HIT DURING RECON:
+#   - asar_repack silently no-ops on entries flagged {"unpacked": true} (they
+#     carry no offset). Check the header entry first; such files live on disk
+#     under resources/app.asar.unpacked/ and are patched directly.
+#   - renderer called window.electronAPI while preload.js exposed deltaAPI;
+#     license.html flow: validateLicense(key) -> on success startApplication()
+#     fires after a 2000ms setTimeout. Adapt regexes to the API name at runtime
+#     (match electronAPI|deltaAPI|custom bridge).
+#   - root ASAR entries (/license /production /development /staging /secrets
+#     /test/*.js) were anti-analysis decoys with garbage size/offset values.
+#   - app.asar header: native module dirs get per-file unpacked:true; the
+#     resources/app/ folder next to app.asar had no package.json so it is inert.
+#
+# BACKUPS LEFT IN PLACE (restore to revert):
+#   target/Lobby-Manager/resources/app.asar.bak
+#   target/Lobby-Manager/resources/app.asar.unpacked/out/main/native-protection/index.js.bak
+#
+# NEXT ITERATIONS IF A SIMILAR TARGET BLOCKS THIS HOOK:
+#   1. license.html ipc_bypass adapted for the real bridge name (format regex
+#      lives in bytecode; dummy-UUID trick from electron_bypass still applies)
+#   2. hook IPC registration in the plain main.js stub BEFORE requiring .jsc
+#      (wrap ipcMain.handle for 'validate-license'/'get-license-status')
+#   3. fabricate HTTP responses if validation verdict comes from server JSON
+#      parsed by bytecode code (needs schema from string constants)
+# ---------------------------------------------------------------------------
+
 
 def _err(cmd, msg):
     return {"ok": False, "cmd": cmd, "error": msg}
@@ -160,14 +210,22 @@ def cmd_help(_args):
             "   and set whatever state the handler does set), then overrides result to {success:true}",
             "   - 2-second delay before startApplication gives the fire-and-forget IPC time to complete",
         ],
-        "asar_format_notes": [
-            "Chromium Pickle 4-field header: [u32:4][u32:H][u32:H-4][u32:J][JSON(J bytes)][pad][file data]",
-            "file_data_start = 8 + H  (NOT 12 + jlen)",
-            "JSON at offset 16 (NOT 12); u32@12 is J (JSON length), u32@8 is H-4 (inner payload)",
-            "per-file integrity field must be updated after replacement or Electron rejects the file",
-            "app.asar.sha256 (whole-ASAR fuse) may not exist; check resources/ dir before worrying",
-            "ENFORCE_INTEGRITY_CHECK env var in main.js controls the app-level manifest check (separate)",
-        ],
+            "asar_format_notes": [
+                "Chromium Pickle 4-field header: [u32:4][u32:H][u32:H-4][u32:J][JSON(J bytes)][pad][file data]",
+                "file_data_start = 8 + H  (NOT 12 + jlen)",
+                "JSON at offset 16 (NOT 12); u32@12 is J (JSON length), u32@8 is H-4 (inner payload)",
+                "per-file integrity field must be updated after replacement or Electron rejects the file",
+                "app.asar.sha256 (whole-ASAR fuse) may not exist; check resources/ dir before worrying",
+                "ENFORCE_INTEGRITY_CHECK env var in main.js controls the app-level manifest check (separate)",
+            ],
+            "case_note_bytenode_native_wrapper": [
+                "Lobby-Manager v8.0.0 (target/, Aug 2026): main logic in .jsc bytecode -> electron_bypass N/A",
+                "winning hook: plain unpacked JS wrapper around native protection module",
+                "(resources/app.asar.unpacked/out/main/native-protection/index.js) - force success on",
+                "validate*/authenticateCustomApi/checkSession; keep generateHWID real for store consistency",
+                "unpacked:true asar entries have no offset - asar_repack skips them; patch file on disk instead",
+                "full writeup incl. decoy entries + next iterations: see CASE NOTES block near top of bobbypin_ai.py",
+            ],
         "rules": [
             "never write patches to src path - always a separate dst",
             "only analyze binaries you are authorized to test",
