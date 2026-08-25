@@ -116,6 +116,99 @@ procedure below). The only kind the byte-patch engine supports.
 3. Patch the recovered Python source and rebuild, or attach the generated
    Frida monitor to the running exe to confirm behavior live.
 
+### dotnet (pe32 with `"dotnet": true`)
+
+1. Triage flags it via `dotnet: true`. **Stop the native loop immediately** —
+   there is no machine code worth branch-flipping; everything is CIL.
+2. Decompile to readable C#: `ilspycmd -p -o <name>_src target.exe`
+   (install: `dotnet tool install -g ilspycmd`). dnSpy/ILSpy GUIs work too.
+3. Locate the guard in source — search for the failure string from
+   `strings`, then read outward for the enclosing method and any boolean
+   flag it feeds (`bool licensed = ...`, `Environment.Exit(...)`).
+4. Two patch routes:
+   - **Source route:** edit the decompiled C#, recompile with
+     `csc`/msbuild against the original references. Clean but assembly
+     references can fight you on obfuscated targets.
+   - **IL route:** open in dnSpy → Edit Method (C#) / or patch IL bytes
+     directly: replace the guard call's branch with `br`/`br.s`
+     (unconditional), or `ldc.i4.1; ret` stubs a validator to always-true.
+5. Strong-named assemblies break after edit — remove the public-key
+   requirement by deleting the `AssemblyName_SN` signature or re-sign with
+   `sn -Ra target.dll key.snk`.
+6. Obfuscated (ConfuserEx/.NET Reactor/SmartAssembly)? Deobfuscate first:
+   de4dot handles most; otherwise expect name soup and rely on string search.
+
+### elf / macho (kind: `elf` | `macho`)
+
+1. Triage reports arch from the header. String triage works as usual:
+   `strings` + tagged literals are your map.
+2. Disassembly: capstone covers x86/x86-64/arm/arm64 — but bobbypin's
+   verified-candidate engine is PE-section-aware only, so `candidates`
+   returns nothing here. Use objdump/otool/Ghidra/radare2 to read code:
+   `objdump -d --no-show-raw-insn target.elf`, `otool -tV target.macho`.
+3. Find the jcc guarding your failure string manually (same discipline as
+   step 4 of the PE procedure). File offsets ≠ virtual addresses: ELF maps
+   via program headers (`readelf -l`), Mach-O via segments (`otool -l`);
+   compute offset↔VA before writing bytes.
+4. Patch in place at the computed file offset with the same flip rule
+   (opcode XOR-1), or NOP the full instruction length. Keep a copy first —
+   `patch` refuses non-PE sources, so use `dd`/python for the byte write,
+   then `verify`-style diffing manually if needed.
+5. macOS code signing: patched binaries fail Gatekeeper — re-sign ad hoc:
+   `codesign --force --sign - target.macho`.
+
+### apk (kind: `apk`)
+
+1. Detected by `AndroidManifest.xml`/`classes.dex` inside the zip. Decode:
+   `apktool d target.apk -o target_src` — gives smali + resources +
+   AndroidManifest.xml you can edit.
+2. Readable Java: `jadx-gui target.apk` — locate the license/purchase guard
+   class, note its smali path under `target_src/smali*/...`.
+3. Patch routes:
+   - **smali:** flip the guard's branch — `if-eqz` ↔ `if-nez`, or replace
+     the validation call's result register with `const/4 vX, 0x1`
+     (always-true). Rebuild: `apktool b target_src -o target_patched.apk`.
+   - **frida:** no rebuild needed — hook the validator method at runtime
+     (`frida -U -f com.example.app`) and force its return value true.
+4. Re-sign before install (debug key is fine for testing):
+   ```
+   zipalign -p 4 target_patched.apk aligned.apk
+   apksigner sign --ks ~/.android/debug.keystore \
+     --ks-pass pass:android --out target_signed.apk aligned.apk
+   ```
+5. Root-integrity / SafetyNet-style checks are separate guards — repeat the
+   loop per check; the manifest (`android:name=` application class) usually
+   hosts the earliest ones.
+
+### upx-packed pe (`packers` contains "UPX")
+
+1. Triage auto-detects UPX and, if the `upx` binary is on PATH, writes an
+   unpacked copy next to the original (`<name>_unpacked.exe`) and reports
+   it in `unpacked_upx`. Install: `brew install upx` / `apt install upx-ucl`
+   / download from upx.github.io.
+2. If auto-unpack didn't fire (custom-packed or newer UPX version):
+   `upx -d -o target_unpacked.exe target.exe`; failure means modified
+   headers — try `-f` or unpack manually in x64dbg (look for the
+   tail-jump out of the first section).
+3. Re-run `plan` on the unpacked copy — sections, imports, and candidates
+   all come alive once unpacked. Analyze/patch THAT file; it behaves
+   identically at runtime.
+
+### nsis / inno setup installers (`packers` lists them)
+
+1. These are PE wrappers around an archive — the real payload hides inside.
+   Extract without running:
+   - NSIS: `7z x installer.exe -o<name>_unpacked/` (or nsisunz)
+   - Inno Setup: `innoextract installer.exe -d <name>_unpacked/`
+   - Either may also be UPX-wrapped — unpack UPX first if so.
+2. Triage each extracted exe/dll like any other target; the license check
+   lives in one of them (often a dll the UI loads).
+3. Installers sometimes validate checksums of their own payload at
+   uninstall/repair time — after patching a payload file, test a full
+   install→run→repair cycle, not just the patched binary alone.
+4. If the *installer itself* gates on a serial before extraction, treat the
+   wrapper as the target: strings/candidates apply since it is plain PE.
+
 ---
 
 ## PE operating procedure

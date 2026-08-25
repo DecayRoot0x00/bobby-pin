@@ -70,10 +70,14 @@ patch the renderer, and repack the ASAR with correct integrity hashes.
 
 | Format | Support |
 |---|---|
-| PE32 / PE32+ `.exe` `.dll` | triage, string hunting, verified patching, Frida monitors |
+| PE32 / PE32+ `.exe` `.dll` | triage, string hunting, verified patching, Frida monitors, UPX auto-unpack |
+| .NET assemblies | detection + full decompile-first playbook (ilspycmd/dnSpy routes) |
 | Electron `.asar` | full JS-layer bypass (`electron_plan` + `electron_bypass`), string triage, ASAR repacking |
 | PyInstaller bundles | unpacking, string triage, SSL monitor |
 | Java `.jar` | extraction, string scanning |
+| Android `.apk` | detection + apktool/jadx playbook (smali patch, rebuild, re-sign) |
+| ELF / Mach-O | triage, string hunting; manual disassembly playbook (objdump/otool/Ghidra) |
+| NSIS / Inno installers | payload extraction guidance (`7z`/`innoextract`) |
 
 ### Per-format workflow
 

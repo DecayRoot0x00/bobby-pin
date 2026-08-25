@@ -780,6 +780,8 @@ def detect_packers(data):
         hits.append("Inno Setup installer")
     if b"\xff Go buildinf:" in data:
         hits.append("Go")
+    if b"UPX!" in data:
+        hits.append("UPX")
     return hits
 
 
@@ -789,6 +791,8 @@ PACKER_HINTS = {
     "NSIS installer": "installer - unpack with 7-Zip or nsisunz to get the real payload",
     "Inno Setup": "installer - extract with innoextract",
     "Go": "Go binary - symbols/strings usually intact, native analysis applies",
+    "UPX": "packed - auto-unpack with: upx -d -o target_unpacked.exe target.exe "
+           "(or pip-install nothing; upx is a standalone binary)",
 }
 
 

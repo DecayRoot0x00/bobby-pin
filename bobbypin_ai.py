@@ -234,6 +234,22 @@ def cmd_help(_args):
     }}
 
 
+def _upx_unpack(path, data):
+    """Try to unpack a UPX-packed PE next to the original; returns new path or None."""
+    if shutil.which("upx") is None:
+        return None
+    out = os.path.splitext(path)[0] + "_unpacked.exe"
+    try:
+        import subprocess
+        r = subprocess.run(["upx", "-d", "-o", out, path],
+                           capture_output=True, timeout=120)
+        if r.returncode == 0 and os.path.exists(out):
+            return out
+    except Exception:
+        pass
+    return None
+
+
 def _triage(path):
     data = open(path, "rb").read()
     rep = {}
@@ -241,6 +257,19 @@ def _triage(path):
     rep["size"] = len(data)
     rep["sha256"] = hashlib.sha256(data).hexdigest()
     if data[:4] == b"PK\x03\x04":
+        try:
+            import zipfile
+            with zipfile.ZipFile(path) as z:
+                names = set(z.namelist())
+        except Exception:
+            names = set()
+        if "AndroidManifest.xml" in names or "classes.dex" in names:
+            rep["kind"] = "apk"
+            rep["note"] = (
+                "android package - decode with apktool, decompile classes.dex "
+                "with jadx, patch smali/java, rebuild and re-sign"
+            )
+            return rep
         rep["kind"] = "jar"
         rep["note"] = "java archive - decompile .class files with jadx/cfr"
         return rep
@@ -257,6 +286,20 @@ def _triage(path):
         rep["kind"] = "pyinstaller"
         rep["note"] = "extract then decompile .pyc with pycdc/uncompyle6"
         return rep
+    if data[:4] == b"\x7fELF":
+        rep["kind"] = "elf"
+        rep["arch"] = {1: "32-bit", 2: "64-bit"}.get(data[4] if len(data) > 4 else 0, "?")
+        rep["note"] = ("linux/bsd executable - string triage applies; "
+                       "capstone disassembles x86/arm/arm64, branch patching is manual")
+        return rep
+    _mo = data[:4]
+    if _mo in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+               b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"):
+        rep["kind"] = "macho"
+        rep["fat"] = _mo in (b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+        rep["note"] = ("macos executable - string triage applies; "
+                       "disassemble with capstone or otool, branch patching is manual")
+        return rep
     try:
         pe = bp.parse_pe(data)
     except ValueError as ex:
@@ -265,8 +308,15 @@ def _triage(path):
         return rep
     rep["kind"] = "pe32+" if pe["pe32plus"] else "pe32"
     rep["dotnet"] = pe["dotnet"]
+    if pe["dotnet"]:
+        rep["note"] = (".NET assembly - decompile with ilspycmd/dnSpy, "
+                       "edit C# or IL, recompile; native byte patches do not apply")
     rep["electron"] = bp.looks_electron(data)
     rep["packers"] = bp.detect_packers(data)
+    if "UPX" in rep["packers"]:
+        unpacked = _upx_unpack(path, data)
+        if unpacked:
+            rep["unpacked_upx"] = unpacked
     rep["imports_total"] = sum(len(i["functions"]) for i in pe["imports"])
     rep["sections"] = [{"name": s["name"], "raw": s["raw"], "vsize": s["vsize"],
                         "exec": bool(s["chars"] & 0x20000000)} for s in pe["sections"]]
