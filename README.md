@@ -156,6 +156,43 @@ Point any AI agent at `AGENTS.md` for the complete operating manual.
 
 ---
 
+## Practice targets
+
+The [`course/`](course/) directory ships three compiled crackmes you can point
+bobbypin at immediately — no need to find your own binary to learn on. Static
+analysis runs anywhere Python runs; *executing* the targets needs Windows or
+wine. Each module has its C source next to it, and a pre-built
+`*_patched.exe` shows what a correct patch produces (diff it with `verify`).
+
+| Target | Lesson | Failure behavior |
+|---|---|---|
+| `course/module1/crackme.exe` | Single guard — the basic loop | prints `License invalid.` |
+| `course/module2/crackme2.exe` | Chained guards — hash check, then account-state check | second lock prints `Account suspended.` |
+| `course/module3/crackme3.exe` | Silent guard — no failure string at all | exits quietly with code 3 |
+
+Try the full workflow on module 1:
+
+```bash
+# triage + verified candidates + suggested next steps
+python3 bobbypin_ai.py plan course/module1/crackme.exe
+
+# then drive patch/verify through a persistent session (see AGENTS.md)
+python3 bobbypin_ai.py serve
+{"cmd":"patch","src":"course/module1/crackme.exe",
+ "dst":"course/module1/crackme_mine.exe",
+ "patches":[{"offset":"<jcc_off from plan>","mode":"nop"}]}
+{"cmd":"verify","orig":"course/module1/crackme.exe",
+ "new":"course/module1/crackme_mine.exe"}
+{"cmd":"quit"}
+```
+
+Module 2 is where most real-world licenses live: the first candidate you find
+is rarely the only gate. Module 3 removes the training wheels — nothing in the
+string table says "fail", so you anchor on the *success* message and the exit
+path instead.
+
+---
+
 ## PE workflow
 
 1. Run the original binary; record its failure/success messages.
