@@ -635,6 +635,81 @@ def unpack_asar(data, files, out_dir):
     return out_dir
 
 
+def repack_asar(orig_path, out_path, modifications):
+    """
+    Repack an ASAR archive with file replacements.
+
+    modifications: {"/asar/path": bytes_content}
+
+    Chromium Pickle header layout (4 x u32 LE):
+      [0] 4            <- outer pickle size (always 4)
+      [1] H            <- inner blob size from offset 8  (= 8 + J + pad)
+      [2] H - 4        <- inner payload length           (= 4 + J + pad)
+      [3] J            <- actual JSON byte length
+      [16 .. 16+J]     <- JSON index
+      [16+J .. 8+H]    <- zero-padding to 4-byte align
+      [8+H ..]         <- concatenated file data
+
+    Per-file integrity dicts in the JSON are updated for replaced files so
+    Electron's built-in ASAR integrity check (if enabled) stays satisfied.
+    """
+    import hashlib as _hl
+
+    def _integrity(content, bsize=4194304):
+        h = _hl.sha256(content).hexdigest()
+        blocks = [_hl.sha256(content[i:i + bsize]).hexdigest()
+                  for i in range(0, max(len(content), 1), bsize)]
+        return {"algorithm": "SHA256", "hash": h, "blockSize": bsize, "blocks": blocks}
+
+    data = open(orig_path, "rb").read()
+    H = u32(data, 4)
+    jlen = u32(data, 12)
+    file_data_start = 8 + H
+    header_json = json.loads(data[16:16 + jlen])
+
+    new_blob = bytearray()
+    results = []
+
+    def walk(node, prefix=""):
+        for name, child in list(node.items()):
+            path = f"{prefix}/{name}"
+            if "files" in child:
+                walk(child["files"], path)
+            elif "offset" in child and "unpacked" not in child:
+                orig_off = int(child["offset"])
+                orig_size = int(child.get("size", 0))
+                if path in modifications:
+                    content = modifications[path]
+                    if "integrity" in child:
+                        child["integrity"] = _integrity(content)
+                    results.append({"path": path, "orig_size": orig_size,
+                                    "new_size": len(content), "replaced": True})
+                else:
+                    content = data[file_data_start + orig_off:
+                                   file_data_start + orig_off + orig_size]
+                child["offset"] = str(len(new_blob))
+                child["size"] = len(content)
+                new_blob.extend(content)
+
+    walk(header_json.get("files", {}))
+
+    new_json = json.dumps(header_json, separators=(",", ":")).encode("utf-8")
+    J = len(new_json)
+    pad = (4 - J % 4) % 4
+    H_new = 8 + J + pad
+
+    with open(out_path, "wb") as f:
+        f.write(struct.pack("<I", 4))
+        f.write(struct.pack("<I", H_new))
+        f.write(struct.pack("<I", H_new - 4))
+        f.write(struct.pack("<I", J))
+        f.write(new_json)
+        f.write(b"\x00" * pad)
+        f.write(bytes(new_blob))
+
+    return {"out": out_path, "size": os.path.getsize(out_path), "replacements": results}
+
+
 ELECTRON_MARKERS = [b"app.asar", b"bytenode", b"ELECTRON_RUN_AS_NODE", b"node_modules"]
 
 
